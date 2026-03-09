@@ -1,0 +1,225 @@
+---
+title: "project2"
+author: "chingiz rabdanov"
+date: "2026-03-08"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+#loading libraries
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+
+set.seed(42)
+
+#step 1 loading datasets
+
+results_raw <- read.csv("https://raw.githubusercontent.com/Chingiz1492/607-project-2/refs/heads/main/results.csv", na.strings = "\\N")
+
+drivers_raw <- read.csv("https://raw.githubusercontent.com/Chingiz1492/607-project-2/refs/heads/main/drivers.csv", na.strings = "\\N")
+
+constructors_raw <- read.csv("https://raw.githubusercontent.com/Chingiz1492/607-project-2/refs/heads/main/constructors.csv", na.strings = "\\N")
+
+#step 2 Datasets before clean
+
+cat("=== results.csv ===\n")
+cat("Rows:", nrow(results_raw), "| Columns:", ncol(results_raw), "\n")
+cat("Columns:", paste(names(results_raw), collapse = ", "), "\n")
+head(results_raw, 3)
+
+cat("\n=== drivers.csv ===\n")
+cat("Rows:", nrow(drivers_raw), "| Columns:", ncol(drivers_raw), "\n")
+cat("Columns:", paste(names(drivers_raw), collapse = ", "), "\n")
+head(drivers_raw, 3)
+
+cat("\n=== constructors.csv ===\n")
+cat("Rows:", nrow(constructors_raw), "| Columns:", ncol(constructors_raw), "\n")
+cat("Columns:", paste(names(constructors_raw), collapse = ", "), "\n")
+head(constructors_raw, 3)
+
+#step 3 Cleaning Dataset "drivers"
+
+# Taking out url и driverRef — technical noise without analytical value
+
+# Creating driver_name = name + surname instead driverId
+
+drivers_clean <- drivers_raw |>
+  select(driverId, forename, surname, nationality) |>
+  mutate(driver_name = paste(forename, surname)) |>
+  select(driverId, driver_name, nationality)
+
+head(drivers_clean, 5)
+
+#step 4 Cleaning Dataset "constructors"
+
+# delete url и constructorRef — Placeholder Noise
+
+# rename name → team_name
+
+constructors_clean <- constructors_raw |>
+  select(constructorId, name) |>
+  rename(team_name = name)
+
+head(constructors_clean, 5)
+
+#step 5 cleaning dataset "Results"
+
+# Remove time — Inconsistent Formatting:
+
+# Winner: "1:34:50.616", others: "+5.478" — cannot be compared
+
+# Remove statusId — no lookup table
+
+# Remove fastestLapTime, fastestLapSpeed ​​— missing for most
+
+# Leave positionText — needed for reliability analysis (R = Retired)
+
+results_clean <- results_raw |>
+  select(resultId, raceId, driverId, constructorId,
+         grid, positionText, positionOrder, points, laps)
+
+head(results_clean, 5)
+
+# step 5 merging datasets
+
+# Replace IDs with real names of drivers and teams
+
+merged <- results_clean |>
+left_join(drivers_clean,      by = "driverId") |>
+left_join(constructors_clean, by = "constructorId")
+
+cat("Merged:", nrow(merged), "rows x", ncol(merged), "columns\n")
+head(merged |> select(raceId, driver_name, team_name, positionText, points), 8)
+
+# step 6 making dataset from wide to tidy
+
+# The grid, positionOrder, points, and laps columns are "wide" metrics.
+
+# We convert them into a single metric column and a single value column.
+
+merged_tidy <- merged |>
+  pivot_longer(
+    cols      = c(grid, positionOrder, points, laps),
+    names_to  = "metric",
+    values_to = "value"
+  ) |>
+  drop_na(value)  #we remove NA - structurally absent values
+
+cat("Tidy:", nrow(merged_tidy), "rows x", ncol(merged_tidy), "columns\n")
+head(merged_tidy, 10)
+
+# step 7 analysis drivers
+
+# Top 6 drivers by points 
+
+top6 <- merged_tidy |>
+  filter(metric == "points") |>
+  group_by(driver_name) |>
+  summarise(total_points = sum(value, na.rm = TRUE)) |>
+  arrange(desc(total_points)) |>
+  slice_head(n = 6) |>
+  pull(driver_name)
+
+cat("Top 6:", paste(top6, collapse = ", "), "\n\n")
+
+# Wide pivot table: rows = races, columns = drivers
+pivot_wide <- merged_tidy |>
+  filter(metric == "points", driver_name %in% top6) |>
+  select(raceId, driver_name, value) |>
+  pivot_wider(
+    names_from  = driver_name,
+    values_from = value,
+    values_fill = 0
+  ) |>
+  arrange(raceId)
+
+print(pivot_wide)
+
+# for the graphic 
+
+pivot_long <- pivot_wide |>
+  pivot_longer(
+    cols      = -raceId,
+    names_to  = "driver_name",
+    values_to = "points"
+  )
+  
+#step 8 visualization
+
+pivot_cumulative <- pivot_long |>
+  arrange(driver_name, raceId) |>
+  group_by(driver_name) |>
+  mutate(cumulative_points = cumsum(points))
+
+ggplot(pivot_cumulative,
+       aes(x = raceId, y = cumulative_points,
+           color = driver_name, group = driver_name)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title    = "Driver Performance — Cumulative Points per Race",
+    subtitle = "Top 6 drivers, Pivot Analysis",
+    x        = "Race ID",
+    y        = "Cumulative Points",
+    color    = "Driver",
+    caption  = "Source: Ergast F1 API"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+  
+#step 9 Reliable teams
+
+# "R" в positionText = The car broke down, we turn it into 1, otherwise 0
+
+reliability <- merged |>
+  mutate(retired = ifelse(positionText == "R", 1, 0)) |>
+  group_by(team_name) |>
+  summarise(
+    total_races   = n(),
+    total_retired = sum(retired, na.rm = TRUE),
+    failure_rate  = round(total_retired / total_races * 100, 1)
+  ) |>
+  filter(total_races >= 20) |>   # только команды с достаточной выборкой
+  arrange(desc(failure_rate)) |>
+  slice_head(n = 15)
+
+print(reliability)
+
+#step 9 visualization Reliable teams
+
+ggplot(reliability,
+       aes(x = reorder(team_name, failure_rate),
+           y = failure_rate,
+           fill = failure_rate)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(failure_rate, "%")),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_fill_gradient(low = "#fff3cd", high = "#dc3545") +
+  scale_y_continuous(limits = c(0, max(reliability$failure_rate) * 1.15)) +
+  labs(
+    title    = "Team Reliability — % of Races Retired",
+    subtitle = "positionText = 'R' means car broke down",
+    x        = "Team",
+    y        = "Failure Rate (%)",
+    caption  = "Source: Ergast F1 API | Min. 20 entries"
+  ) +
+  theme_minimal(base_size = 13)
+
+#step 10 worst and best teams
+  worst <- reliability |> slice(1)
+best  <- reliability |> slice(n())
+
+cat("Most fragile:", worst$team_name,
+    "—", worst$failure_rate, "% failure rate (",
+    worst$total_retired, "of", worst$total_races, "races)\n")
+
+cat("Most reliable:", best$team_name,
+    "—", best$failure_rate, "% failure rate (",
+    best$total_retired, "of", best$total_races, "races)\n")
+```
